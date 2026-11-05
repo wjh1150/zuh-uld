@@ -880,7 +880,7 @@ tbody tr:last-child td{border-bottom:none}
     <p style="margin-bottom:12px"><b>⑦ 数据持久化</b><br>ULD 数据、航空公司、操作人、忽略名单、自重表（O3/JG）、默认型号自重表、航司型号规则均已接入 Supabase 云端存储，多端实时同步。</p>
     <p style="margin-bottom:12px"><b>⑧ 分页</b><br>列表按页展示，可选每页 50/100/200/500 条，全选仅对当前页生效。</p>
     <p style="margin-bottom:12px"><b>⑨ 撤销</b><br>删除、标记损坏/良好、状态变更、批量操作后可点 toast 上「↩ 撤销」按钮在 5 秒内回滚。</p>
-    <p style="margin-bottom:12px"><b>⑩ 并发冲突防护</b><br>云端数据带版本号，两台设备同时修改时，后写入方会看到冲突弹窗，可选覆盖或用云端版本。</p>
+    <p style="margin-bottom:12px"><b>⑩ 云端同步</b><br>修改数据后自动推送到 Supabase 云端，其他设备通过实时订阅拉取最新。以云端数据为准。</p>
     <p style="margin-bottom:12px"><b>⑪ 操作日志中心</b><br>侧边栏「操作日志」页汇总所有 ULD 的操作履历，可按操作人 / 动作 / 关键词筛选，点编号可跳转详情。</p>
     <p style="margin-bottom:12px"><b>⑫ 提示音</b><br>各操作自动播放轻音效（成功/警告/危险/错误）。顶栏 🔔 可开关，状态自动保存。</p>
     <p style="margin-bottom:12px"><b>⑬ 移动端筛选</b><br>手机上点「⚙️ 筛选」展开面板，选完筛选项 / 点面板外区域 / 按 Enter 搜索会自动收起。</p>
@@ -1073,6 +1073,7 @@ function buildNoIndex(){
 let supabaseClient = null;
 try{ if(typeof supabase !== 'undefined' && supabase.createClient) supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); }catch(e){}
 let _lastLocalSaveTs = 0, _lastConfigSaveTs = 0;
+let _lastPushedSnapshot = '';
 const rowVersion = { main: 0, config: 0 };
 
 /* ============ 变量 ============ */
@@ -1193,24 +1194,28 @@ let _saveUldsTimer = null;
 function saveUlds(){
   saveUldsLocal();
   if(!supabaseClient) return;
+  const snapshot = JSON.stringify(ulds.map(serializeUld));
+  if(snapshot === _lastPushedSnapshot) return; // 数据没变，不推
   clearTimeout(_saveUldsTimer);
-  _saveUldsTimer = setTimeout(()=>pushUldsToCloud(false), APP_CONFIG.debounce.saveUlds);
+  _saveUldsTimer = setTimeout(()=>{
+    const current = JSON.stringify(ulds.map(serializeUld));
+    if(current === _lastPushedSnapshot) return;
+    pushUldsToCloud(current);
+  }, APP_CONFIG.debounce.saveUlds);
 }
 
-async function pushUldsToCloud(force){
+async function pushUldsToCloud(snapshot){
   if(!supabaseClient) return;
   try{
     const { data } = await supabaseClient.from(SUPABASE_TABLE).select('payload').eq('id', SUPABASE_ROW_ID).maybeSingle();
     const remoteV = getVersionFromPayload(data?.payload);
-    if(!force && remoteV !== rowVersion.main){
-      const ok = confirm('⚠️ 其他设备刚更新了数据（云端 v'+remoteV+'，本地 v'+rowVersion.main+'）\n\n点【确定】= 用本地覆盖云端\n点【取消】= 放弃本地修改，拉取云端最新');
-      if(!ok){ await loadUlds(); render(); return; }
-    }
     const newV = remoteV + 1;
-    const newPayload = { _v: newV, _t: Date.now(), data: ulds.map(serializeUld) };
-    _lastLocalSaveTs = Date.now();
+    const now = Date.now();
+    const newPayload = { _v: newV, _t: now, data: JSON.parse(snapshot) };
+    _lastLocalSaveTs = now;
     await supabaseClient.from(SUPABASE_TABLE).update({ payload: newPayload, updated_at: new Date().toISOString() }).eq('id', SUPABASE_ROW_ID);
     rowVersion.main = newV;
+    _lastPushedSnapshot = snapshot;
   }catch(e){ console.warn('ULD 云端推送失败', e); }
 }
 
@@ -1282,21 +1287,16 @@ let _configSaveTimer = null;
 function saveConfigToCloud(){
   if(!supabaseClient) return;
   clearTimeout(_configSaveTimer);
-  _configSaveTimer = setTimeout(()=>_pushConfigToCloud(false), APP_CONFIG.debounce.saveConfig);
+  _configSaveTimer = setTimeout(()=>_pushConfigToCloud(), APP_CONFIG.debounce.saveConfig);
 }
-async function _pushConfigToCloud(force){
+async function _pushConfigToCloud(){
   if(!supabaseClient) return;
   try{
     const { data } = await supabaseClient.from(SUPABASE_TABLE).select('payload').eq('id', CONFIG_ROW_ID).maybeSingle();
     const remoteV = getVersionFromPayload(data?.payload);
-    if(!force && remoteV !== rowVersion.config){
-      const ok = confirm('⚠️ 其他设备刚修改了配置\n\n点【确定】= 用本地覆盖云端\n点【取消】= 放弃本地，拉取云端');
-      if(!ok){ await loadConfigFromCloud(); refreshUIAfterConfigSync(); return; }
-    }
     const newV = remoteV + 1;
-    const cfg = getConfigSnapshot();
     _lastConfigSaveTs = Date.now();
-    await supabaseClient.from(SUPABASE_TABLE).update({ payload: { _v: newV, _t: Date.now(), data: cfg }, updated_at: new Date().toISOString() }).eq('id', CONFIG_ROW_ID);
+    await supabaseClient.from(SUPABASE_TABLE).update({ payload: { _v: newV, _t: Date.now(), data: getConfigSnapshot() }, updated_at: new Date().toISOString() }).eq('id', CONFIG_ROW_ID);
     rowVersion.config = newV;
   }catch(e){ console.warn('配置云端推送失败', e); }
 }
@@ -1565,10 +1565,19 @@ function setupRealtime(){
       .on('postgres_changes',
         { event: '*', schema: 'public', table: SUPABASE_TABLE, filter: 'id=eq.' + SUPABASE_ROW_ID },
         async function(){
-          if(Date.now() - _lastLocalSaveTs < 1200) return;
+          if(Date.now() - _lastLocalSaveTs < 800) return; // 自己刚推的，忽略
           try{
             const loaded = await loadUlds();
-            if(loaded){ restoreUidFromUlds(); const removed=cleanupExpiredOutbound(); if(removed>0) toast('🧹 已自动清理 '+removed+' 条超过 3 个月的出库记录'); render({skipSave:true}); if(!$('view-verify').hidden) renderVerifyList(); }
+            if(loaded){
+              const current = JSON.stringify(ulds.map(serializeUld));
+              if(current === _lastPushedSnapshot) return; // 拉回来就是自己刚推的，跳过
+              _lastPushedSnapshot = current;
+              restoreUidFromUlds();
+              const removed = cleanupExpiredOutbound();
+              if(removed > 0) toast('🧹 已自动清理 '+removed+' 条超过 3 个月的出库记录');
+              render({skipSave:true}); // 关键：拉云端后不要再推回去
+              if(!$('view-verify').hidden) renderVerifyList();
+            }
           }catch(e){}
         })
       .on('postgres_changes',
