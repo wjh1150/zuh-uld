@@ -393,17 +393,12 @@ tbody tr:last-child td{border-bottom:none}
 }
 </style>
 <script>
-/* 动态注入 manifest（PWA） */
 (function(){
   try{
     var iconUrl = location.origin + location.pathname.replace(/[^\/]*$/, '') + 'logo.png';
     var manifest = {
-      name: 'ZUH ULD 集装器管理',
-      short_name: 'ZUH ULD',
-      start_url: './',
-      display: 'standalone',
-      background_color: '#f1f5f9',
-      theme_color: '#0f172a',
+      name: 'ZUH ULD 集装器管理', short_name: 'ZUH ULD', start_url: './', display: 'standalone',
+      background_color: '#f1f5f9', theme_color: '#0f172a',
       icons: [
         { src: iconUrl, sizes: '192x192', type: 'image/png', purpose: 'any' },
         { src: iconUrl, sizes: '512x512', type: 'image/png', purpose: 'any' }
@@ -1074,6 +1069,7 @@ let supabaseClient = null;
 try{ if(typeof supabase !== 'undefined' && supabase.createClient) supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); }catch(e){}
 let _lastLocalSaveTs = 0, _lastConfigSaveTs = 0;
 let _lastPushedSnapshot = '';
+let _lastLocalSnapshot = '';
 const rowVersion = { main: 0, config: 0 };
 
 /* ============ 变量 ============ */
@@ -1192,10 +1188,12 @@ function saveUldsLocal(){ try{ localStorage.setItem(ULD_DATA_KEY, JSON.stringify
 
 let _saveUldsTimer = null;
 function saveUlds(){
+  const snapshot = JSON.stringify(ulds.map(serializeUld));
+  if(snapshot === _lastLocalSnapshot) return;
+  _lastLocalSnapshot = snapshot;
   saveUldsLocal();
   if(!supabaseClient) return;
-  const snapshot = JSON.stringify(ulds.map(serializeUld));
-  if(snapshot === _lastPushedSnapshot) return; // 数据没变，不推
+  if(snapshot === _lastPushedSnapshot) return;
   clearTimeout(_saveUldsTimer);
   _saveUldsTimer = setTimeout(()=>{
     const current = JSON.stringify(ulds.map(serializeUld));
@@ -1295,9 +1293,9 @@ async function _pushConfigToCloud(){
     const { data } = await supabaseClient.from(SUPABASE_TABLE).select('payload').eq('id', CONFIG_ROW_ID).maybeSingle();
     const remoteV = getVersionFromPayload(data?.payload);
     const newV = remoteV + 1;
-    _lastConfigSaveTs = Date.now();
     await supabaseClient.from(SUPABASE_TABLE).update({ payload: { _v: newV, _t: Date.now(), data: getConfigSnapshot() }, updated_at: new Date().toISOString() }).eq('id', CONFIG_ROW_ID);
     rowVersion.config = newV;
+    _lastConfigSaveTs = Date.now();
   }catch(e){ console.warn('配置云端推送失败', e); }
 }
 async function loadConfigFromCloud(){
@@ -1532,6 +1530,7 @@ function updateExportFilterBtn(count){
 }
 
 function render(opts){
+  _allLogsCache = null;
   const key=getFilterKey();
   if(key!==lastFilterKey){ selectedIds.clear(); lastFilterKey=key; currentPage=1; }
   rebuildModelFilter(); rebuildAirlineFilter(); updateDateWrap();
@@ -1565,17 +1564,16 @@ function setupRealtime(){
       .on('postgres_changes',
         { event: '*', schema: 'public', table: SUPABASE_TABLE, filter: 'id=eq.' + SUPABASE_ROW_ID },
         async function(){
-          if(Date.now() - _lastLocalSaveTs < 800) return; // 自己刚推的，忽略
           try{
             const loaded = await loadUlds();
             if(loaded){
               const current = JSON.stringify(ulds.map(serializeUld));
-              if(current === _lastPushedSnapshot) return; // 拉回来就是自己刚推的，跳过
+              if(current === _lastPushedSnapshot) return;
               _lastPushedSnapshot = current;
               restoreUidFromUlds();
               const removed = cleanupExpiredOutbound();
               if(removed > 0) toast('🧹 已自动清理 '+removed+' 条超过 3 个月的出库记录');
-              render({skipSave:true}); // 关键：拉云端后不要再推回去
+              render({skipSave:true});
               if(!$('view-verify').hidden) renderVerifyList();
             }
           }catch(e){}
@@ -1870,6 +1868,15 @@ function showDetail(id){
   else $('detailLogs').innerHTML=logs.map(log=>`<li class="log-item"><div class="log-time">${fmt(log.time)}</div><div class="log-content"><span class="log-op">${esc(log.op)}</span><span class="log-action">${esc(log.action)}</span><span class="log-detail">${esc(log.detail)}</span></div></li>`).join('');
   openModal('modalDetail');
 }
+
+document.addEventListener('click', function(e){
+  const btn = e.target.closest('[data-detail-id]');
+  if(btn){
+    e.preventDefault();
+    e.stopPropagation();
+    showDetail(btn.dataset.detailId);
+  }
+});
 
 function openModal(id){ $(id).hidden=false; }
 function resetBatchPending(){ pendingBatchStatus=null; pendingOutboundMethod=''; pendingOutboundIds=[]; }
@@ -2545,7 +2552,7 @@ $('btnVerifySelected').addEventListener('click',function(){
         const exist=ulds.find(u=>u.no.toUpperCase()===fullNo);
         if(exist){
           const st=STOCK[exist.stockStatus]||STOCK.inbound, aw=AIRWORTHINESS[exist.airworthiness]||AIRWORTHINESS.good;
-          existTip.innerHTML=`<div class="title"><span>⚠️ 该编号已存在于系统中</span><button type="button" class="btn-link" onclick="showDetail('${exist.id}')">查看明细</button></div><div>当前状态：<b>${st.label}</b> · 适航性：<b>${aw.label}</b></div><div>操作人：${esc(exist.op||'—')} · 更新时间：${fmt(exist.time)}</div>`;
+          existTip.innerHTML=`<div class="title"><span>⚠️ 该编号已存在于系统中</span><button type="button" class="btn-link" data-detail-id="${exist.id}">查看明细</button></div><div>当前状态：<b>${st.label}</b> · 适航性：<b>${aw.label}</b></div><div>操作人：${esc(exist.op||'—')} · 更新时间：${fmt(exist.time)}</div>`;
           existTip.style.display='flex'; btnSave.disabled=true; btnSave.style.opacity='0.6'; btnSave.textContent='该编号已存在，请勿重复入库';
         } else { existTip.style.display='none'; btnSave.disabled=false; btnSave.style.opacity='1'; btnSave.textContent='核实无误，直接入库'; }
       } else { existTip.style.display='none'; btnSave.disabled=false; btnSave.style.opacity='1'; btnSave.textContent='核实无误，直接入库'; }
@@ -2607,7 +2614,7 @@ $('btnVerifySelected').addEventListener('click',function(){
         const exist=ulds.find(u=>u.no.toUpperCase()===fullNo);
         if(exist){
           const st=STOCK[exist.stockStatus]||STOCK.inbound, aw=AIRWORTHINESS[exist.airworthiness]||AIRWORTHINESS.good;
-          existTip.innerHTML=`<div class="title"><span>⚠️ 该编号已存在于系统中</span><button type="button" class="btn-link" onclick="showDetail('${exist.id}')">查看明细</button></div><div>当前状态：<b>${st.label}</b> · 适航性：<b>${aw.label}</b></div><div>操作人：${esc(exist.op||'—')} · 更新时间：${fmt(exist.time)}</div>`;
+          existTip.innerHTML=`<div class="title"><span>⚠️ 该编号已存在于系统中</span><button type="button" class="btn-link" data-detail-id="${exist.id}">查看明细</button></div><div>当前状态：<b>${st.label}</b> · 适航性：<b>${aw.label}</b></div><div>操作人：${esc(exist.op||'—')} · 更新时间：${fmt(exist.time)}</div>`;
           existTip.style.display='flex'; btnSave.disabled=true; btnSave.style.opacity='0.6'; btnSave.textContent='该编号已存在，请勿重复新增';
         } else { existTip.style.display='none'; btnSave.disabled=false; btnSave.style.opacity='1'; btnSave.textContent='保存并继续'; }
       } else { existTip.style.display='none'; btnSave.disabled=false; btnSave.style.opacity='1'; btnSave.textContent='保存并继续'; }
@@ -2979,6 +2986,15 @@ loadWeather();
 setInterval(loadWeather,30*60*1000);
 
 /* ============ 启动 ============ */
+window.addEventListener('beforeunload', ()=>{
+  try{
+    const snapshot = JSON.stringify(ulds.map(serializeUld));
+    if(snapshot !== _lastLocalSnapshot){
+      localStorage.setItem(ULD_DATA_KEY, snapshot);
+    }
+  }catch(e){}
+});
+
 fillAirlineOptions();
 initOperatorSys();
 updateAdminUI();
